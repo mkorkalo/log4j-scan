@@ -17,7 +17,7 @@ from urllib import parse as urlparse
 import base64
 import json
 import random
-from uuid import uuid4
+from uuid import NAMESPACE_DNS, uuid4
 from base64 import b64encode
 from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.PublicKey import RSA
@@ -52,7 +52,7 @@ default_headers = {
     'Accept': '*/*'  # not being tested to allow passing through checks on Accept header in older web-servers
 }
 post_data_parameters = ["username", "user", "email", "email_address", "password"]
-timeout = httpx.Timeout(timeout=99999999, connect=4, pool=9999999)
+timeout = httpx.Timeout(timeout=4, pool=None)
 
 errors = {}
 succeeded = 0
@@ -404,8 +404,6 @@ async def main():
             await asyncio.gather(*tasks)
         
     cprint(f"Succeeded connections: {succeeded}", "magenta")
-
-
     cprint(f"Failures: \n{pprint.pformat(errors, width=4, indent=3)}", "magenta")
     
 
