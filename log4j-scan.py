@@ -298,7 +298,7 @@ def parse_url(url):
 
 
 async def scan_url(url, callback_host, client: httpx.AsyncClient):
-    cprint(f"[•] URL: {url}", "magenta")
+    #cprint(f"[•] URL: {url}", "magenta")
     global succeeded
     parsed_url = parse_url(url)
     random_string = ''.join(random.choice('0123456789abcdefghijklmnopqrstuvwxyz') for i in range(7))
@@ -307,7 +307,7 @@ async def scan_url(url, callback_host, client: httpx.AsyncClient):
     if args.waf_bypass_payloads:
         payloads.extend(generate_waf_bypass_payloads(f'{parsed_url["host"]}.{callback_host}', random_string))
     if args.cve_2021_45046:
-        cprint(f"[•] Scanning for CVE-2021-45046 (Log4j v2.15.0 Patch Bypass - RCE)", "yellow")
+        #cprint(f"[•] Scanning for CVE-2021-45046 (Log4j v2.15.0 Patch Bypass - RCE)", "yellow")
         payloads.extend(get_cve_2021_45046_payloads(f'{parsed_url["host"]}.{callback_host}', random_string))
 
     for payload in payloads:
@@ -368,7 +368,7 @@ async def scan_url(url, callback_host, client: httpx.AsyncClient):
                 e_type = type(e)
                 errors.setdefault(e_type, 0)
                 errors[e_type] = errors[e_type] + 1
-                cprint(f"EXCEPTION: {e_type} {e}")
+                #cprint(f"EXCEPTION: {e_type} {e}")
 
 
 def chunks(lst, n):
@@ -422,10 +422,10 @@ async def main():
                 tasks.append(asyncio.create_task(scan_url(url, dns_callback_host, client=client)))
                 processed += 1
             await asyncio.gather(*tasks)
-        print(f"Scanning: {processed}/{len(urls)}")
+            print(f"Scanned: {processed}/{len(urls)}")
         
     cprint(f"Succeeded connections: {succeeded}", "magenta")
-    cprint(f"Failures: \n{pprint.pformat(errors, width=4, indent=3)}", "magenta")
+    cprint(f"Failures: \n{pprint.pformat(errors, width=4, indent=3)}\n", "magenta")
     
 
     cprint("[•] Payloads sent to all URLs. Waiting for DNS OOB callbacks.", "cyan")
